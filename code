@@ -1,0 +1,76 @@
+#!/bin/bash
+echo -e " H!, \n Script_Purpose: Basic Server Hardening Script" > server_details.csv
+echo -e " #######################################" >> server_details.csv
+bkptime=("`date +%y%m%d`")
+## changing root password
+root_pwd=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+echo "$root_pwd" | passwd root --stdin
+## Creating an user with root privileges
+useradd -u 0 -g 0 -o rpu
+rpu_pwd=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 14 | head -n 1)
+echo "$rpu_pwd" | passwd rpu --stdin
+## Change SSH port number
+read -p "Enter SSH Port No : " ssh_port
+mkdir /backups
+cp -a /etc/ssh/sshd_config /backups/"$bkptime"_sshd_config
+sed -i "/\#Port 22/a Port $ssh_port" /etc/ssh/sshd_config
+## Disable Direct root login --4
+sed -i "/\#PermitRootLogin yes/a PermitRootLogin no" /etc/ssh/sshd_config
+## Deny Root access as su -root
+cp -a /etc/pam.d/su /backups/"$bkptime"_etc_pam.d_su
+sed -i "/pam_wheel.so use_uid/s/^#//" /etc/pam.d/su
+## Create user accounts for PSE group.
+groupadd pseg
+read -p "Enter All PSE Members(eg pse,user1,user2) : " pse_members
+read -s -p "Enter PSE Common Password : " c_password
+for USER in ${pse_members//,/ }
+do
+    useradd -G wheel,pseg $USER
+    echo -e "${c_password}\n${c_password}" | passwd $USER
+done
+## Giving sudo privileges for PSEG group on requirement
+cp -a /etc/sudoers /backups/"$bkptime"_etc_sudoers
+sed -i -e '$a\
+## Shutdown and Reboot\
+Cmnd_Alias SHUTDOWN = /sbin/halt, /sbin/shutdown, /sbin/poweroff, /sbin/reboot, /sbin/init\
+## Services\
+Cmnd_Alias SERVICES = /sbin/service, /sbin/chkconfig, /etc/init.d/*\
+## Processes\
+Cmnd_Alias PROCESSES = /bin/nice, /bin/kill, /usr/bin/kill, /usr/bin/killall\
+## Other Selective Commands\
+Cmnd_Alias SELECTIVE = /bin/su, /usr/sbin/visudo\
+%pseg ALL=(ALL)ALL, !SHUTDOWN, !SERVICES, !PROCESSES, !SELECTIVE' /etc/sudoers
+## Allowing in IPTables and TCPWrappers __8
+cp -a /etc/sysconfig/iptables /backups/"$bkptime"_etc_sysconfig_iptables
+read -p "Enter IP Address To Allow Server Access (If Multiple IPs Then With Comma Separated): " ips
+for ip in ${ips//,/ }; do     echo -e $ip ; done > ips.csv
+for line in `cat ips.csv`;
+do
+        echo "sshd: $line" >> /etc/hosts.allow
+        /sbin/iptables -A INPUT -s "$line"/32 -p icmp -m comment --comment "Trusted Host" -m icmp --icmp-type 8 -m state --state NEW,ESTABLISHED -j ACCEPT
+        /sbin/iptables -A INPUT -s "$line"/32 -p tcp -m comment --comment "Trusted Host " -m tcp --dport "$ssh_port" -m state --state NEW,ESTABLISHED -j ACCEPT
+done
+/sbin/iptables -A INPUT -p tcp -m state --state NEW,ESTABLISHED -m tcp --dport 25 -j ACCEPT
+/sbin/service iptables save
+/sbin/service iptables restart && /sbin/service sshd restart
+/sbin/chkconfig --level 1235 sshd on
+/sbin/chkconfig --level 1235 iptables on
+/etc/rc.d/init.d/postfix start
+/sbin/chkconfig --level 1235 postfix on
+yum install -y epel-release mailx mail vim elinks policycoreutils-python wget jwhois dmidecode
+yum install -y imvirt GeoIP GeoIP-data
+yum -y update
+echo -e " Host Name :`hostname`" >> server_details.csv
+echo -e " Operating System:`cat /etc/redhat-release`" >> server_details.csv
+echo -e " IP Address : `hostname -I`" >> server_details.csv
+echo -e " Login Credentials \t root: $root_pwd \t rpu: $rpu_pwd \t SSH Port: $ssh_port " >> server_details.csv
+echo -e " NB: Direct root Login Disabled For Security Purpose" >> server_details.csv
+echo -e " Users Added For wheel,pseg Group: $pse_members" >> server_details.csv
+echo -e " NB: For All Above Users First Time Login With PSE Common Password & Update With Their Own PWD" >> server_details.csv
+echo -e " SSH/Remote Login Allowed From: $ips" >> server_details.csv
+/usr/bin/geoiplookup `hostname -I` > ip_loc.csv
+echo -e `sed -n 1p < ip_loc.csv` >> server_details.csv
+/usr/bin/imvirt > host_type.csv
+echo -e " Host Type : `cat host_type.csv`" >> server_details.csv
+mail -a trial_03.sh -s " New Server `hostname -I` | Details (Plz Ignore This Mail)" support@advaitamtech.com < server_details.csv
+rm -f server_details.csv host_type.csv ip_loc.csv ips.csv
